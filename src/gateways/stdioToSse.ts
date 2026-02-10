@@ -72,14 +72,9 @@ export async function stdioToSse(args: StdioToSseArgs) {
     process.exit(code ?? 1)
   })
 
-  const server = new Server(
-    { name: 'supergateway', version: getVersion() },
-    { capabilities: {} },
-  )
-
   const sessions: Record<
     string,
-    { transport: SSEServerTransport; response: express.Response }
+    { transport: SSEServerTransport; response: express.Response; server: Server }
   > = {}
 
   const app = express()
@@ -111,12 +106,18 @@ export async function stdioToSse(args: StdioToSseArgs) {
       headers,
     })
 
+    // Create a new Server instance for each SSE connection
+    const server = new Server(
+      { name: 'supergateway', version: getVersion() },
+      { capabilities: {} },
+    )
+
     const sseTransport = new SSEServerTransport(`${baseUrl}${messagePath}`, res)
     await server.connect(sseTransport)
 
     const sessionId = sseTransport.sessionId
     if (sessionId) {
-      sessions[sessionId] = { transport: sseTransport, response: res }
+      sessions[sessionId] = { transport: sseTransport, response: res, server }
     }
 
     sseTransport.onmessage = (msg: JSONRPCMessage) => {
@@ -126,16 +127,31 @@ export async function stdioToSse(args: StdioToSseArgs) {
 
     sseTransport.onclose = () => {
       logger.info(`SSE connection closed (session ${sessionId})`)
+      if (sessionId && sessions[sessionId]) {
+        sessions[sessionId].server.close().catch((err) => {
+          logger.error(`Error closing server for session ${sessionId}:`, err)
+        })
+      }
       delete sessions[sessionId]
     }
 
     sseTransport.onerror = (err) => {
       logger.error(`SSE error (session ${sessionId}):`, err)
+      if (sessionId && sessions[sessionId]) {
+        sessions[sessionId].server.close().catch((err) => {
+          logger.error(`Error closing server for session ${sessionId}:`, err)
+        })
+      }
       delete sessions[sessionId]
     }
 
     req.on('close', () => {
       logger.info(`Client disconnected (session ${sessionId})`)
+      if (sessionId && sessions[sessionId]) {
+        sessions[sessionId].server.close().catch((err) => {
+          logger.error(`Error closing server for session ${sessionId}:`, err)
+        })
+      }
       delete sessions[sessionId]
     })
   })
